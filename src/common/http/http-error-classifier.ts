@@ -13,17 +13,29 @@ const networkCodes = new Set([
 export const classifyHttpFailure = (
   input: unknown,
   responseStatus?: number,
+  responseHeaders?: Headers,
 ): ScraperError => {
+  if (responseStatus === 403) {
+    return new ScraperError('Forbidden', 'Forbidden by upstream', { responseStatus });
+  }
+
   if (responseStatus === 404) {
     return new ScraperError('NotFound', 'Resource not found', { responseStatus });
   }
 
   if (responseStatus === 429) {
-    return new ScraperError('RateLimited', 'Upstream rate limited request', { responseStatus });
+    return new ScraperError('RateLimited', 'Upstream rate limited request', {
+      responseStatus,
+      retryAfter: responseHeaders?.get('retry-after') ?? null,
+    });
   }
 
   if (responseStatus && responseStatus >= 500) {
     return new ScraperError('Temporary', 'Upstream temporary failure', { responseStatus });
+  }
+
+  if (responseStatus && responseStatus >= 400) {
+    return new ScraperError('Permanent', 'Upstream permanent HTTP failure', { responseStatus });
   }
 
   if (input instanceof ScraperError) {
@@ -46,9 +58,14 @@ export const classifyHttpFailure = (
 };
 
 export const shouldRetryHttpError = (code: ScraperErrorCode, status?: number): boolean => {
-  if (status === 404) {
+  if (status && status >= 400 && status < 500 && status !== 429) {
     return false;
   }
 
-  return code === 'Temporary' || code === 'RateLimited' || code === 'Timeout' || code === 'NetworkError';
+  return (
+    code === 'Temporary' ||
+    code === 'RateLimited' ||
+    code === 'Timeout' ||
+    code === 'NetworkError'
+  );
 };

@@ -104,7 +104,7 @@ POST /applications/:id/marketplace-refresh
 
 ## Production TODO
 
-- перейти з `synchronize: true` на SQL migrations;
+- розширити migration pipeline для контрольованих schema upgrades;
 - додати окремий dead-letter queue та replay tooling;
 - додати Prometheus endpoint / OpenTelemetry traces;
 - винести marketplace adapters на реальні scraper/API clients;

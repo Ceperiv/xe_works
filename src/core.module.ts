@@ -16,6 +16,7 @@ import {
   PublisherEntity,
   ScrapingJobEntity,
 } from './database/entities';
+import { InitialSchemaAndHardening1755799200000 } from './database/migrations/1755799200000-initial-schema-and-hardening';
 import { ApplicationsService } from './modules/applications/applications.service';
 import { AdsTxtFetcher } from './modules/ads-txt/ads-txt.fetcher';
 import { MarketplaceProviderRegistry } from './modules/marketplace/marketplace-provider.registry';
@@ -36,8 +37,10 @@ import { SeedService } from './modules/seed/seed.service';
       useFactory: (config: ConfigType<typeof appConfig>) => ({
         type: 'postgres',
         url: config.database.url,
-        synchronize: true,
+        synchronize: false,
         entities: [ApplicationEntity, PublisherEntity, AppAdsTxtEntity, ScrapingJobEntity],
+        migrations: [InitialSchemaAndHardening1755799200000],
+        migrationsRun: false,
       }),
     }),
     TypeOrmModule.forFeature([ApplicationEntity, PublisherEntity, AppAdsTxtEntity, ScrapingJobEntity]),

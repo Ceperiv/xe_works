@@ -1,12 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import {
-  APPLICATION_STATUS,
-  JOB_TYPES,
-  MARKETPLACE,
-  SCRAPING_JOB_STATUS,
-} from '../../common/constants';
+import { APPLICATION_STATUS, JOB_TYPES, SCRAPING_JOB_STATUS } from '../../common/constants';
 import { ScraperError, isRetryableErrorCode } from '../../common/errors/scraper-error';
 import { AppLogger } from '../../common/logging/app-logger.service';
 import { MetricsService } from '../../common/metrics/metrics.service';
@@ -53,6 +48,7 @@ export class MarketplaceService {
         application.status = APPLICATION_STATUS.notFound;
         application.lastMarketplaceCheckAt = now;
         application.nextMarketplaceCheckAt = this.addDays(now, 7);
+        application.nextAdsTxtCheckAt = null;
         await this.applicationRepository.save(application);
         await this.markJobFinished(applicationId, JOB_TYPES.marketplaceDiscovery, SCRAPING_JOB_STATUS.succeeded);
         return;
@@ -71,6 +67,11 @@ export class MarketplaceService {
               domain: normalizedDomain,
             }),
           ));
+
+        if (publisher.name !== discovered.publisherName) {
+          publisher.name = discovered.publisherName;
+          publisher = await this.publisherRepository.save(publisher);
+        }
       }
 
       application.name = discovered.name;
@@ -81,7 +82,7 @@ export class MarketplaceService {
       application.status = discovered.removed ? APPLICATION_STATUS.removed : APPLICATION_STATUS.active;
       application.lastMarketplaceCheckAt = now;
       application.nextMarketplaceCheckAt = this.addDays(now, 7);
-      application.nextAdsTxtCheckAt = now;
+      application.nextAdsTxtCheckAt = !discovered.removed && normalizedDomain ? now : null;
 
       await this.applicationRepository.save(application);
       await this.markJobFinished(applicationId, JOB_TYPES.marketplaceDiscovery, SCRAPING_JOB_STATUS.succeeded);
@@ -95,14 +96,15 @@ export class MarketplaceService {
           event: 'marketplace_refresh_succeeded',
           runId,
           applicationId,
+          bundleId: application.bundleId,
           publisherDomain: application.publisherDomain,
           durationMs: Date.now() - startedAt,
         },
         MarketplaceService.name,
       );
 
-      if (application.publisherDomain) {
-        await this.enqueueService.enqueue(applicationId, JOB_TYPES.adsTxtFetch, 'worker');
+      if (!discovered.removed && application.publisherDomain) {
+        await this.enqueueService.enqueueIfNeeded(applicationId, JOB_TYPES.adsTxtFetch, 'worker');
       }
     } catch (error) {
       const classified =
@@ -112,14 +114,16 @@ export class MarketplaceService {
         ? APPLICATION_STATUS.marketplaceFailed
         : APPLICATION_STATUS.notFound;
       application.lastMarketplaceCheckAt = new Date();
-      application.nextMarketplaceCheckAt = this.addHours(new Date(), 6);
+      application.nextMarketplaceCheckAt = isRetryableErrorCode(classified.code)
+        ? this.addHours(new Date(), 6)
+        : this.addDays(new Date(), 7);
 
       await this.applicationRepository.save(application);
       await this.markJobFinished(
         applicationId,
         JOB_TYPES.marketplaceDiscovery,
         isRetryableErrorCode(classified.code)
-          ? SCRAPING_JOB_STATUS.failed
+          ? SCRAPING_JOB_STATUS.retrying
           : SCRAPING_JOB_STATUS.deadLetter,
         classified.message,
       );
@@ -149,7 +153,7 @@ export class MarketplaceService {
     await this.scrapingJobRepository.increment({ applicationId, type }, 'attempts', 1);
     await this.scrapingJobRepository.update(
       { applicationId, type },
-      { status: SCRAPING_JOB_STATUS.running, startedAt: new Date() },
+      { status: SCRAPING_JOB_STATUS.running, startedAt: new Date(), finishedAt: null, error: null },
     );
   }
 

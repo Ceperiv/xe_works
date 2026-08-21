@@ -6,7 +6,10 @@ import { ScraperError, isRetryableErrorCode } from '../../common/errors/scraper-
 import { ReliableHttpClient } from '../../common/http/reliable-http.client';
 import { AppLogger } from '../../common/logging/app-logger.service';
 import { MetricsService } from '../../common/metrics/metrics.service';
-import { DistributedRateLimiter } from '../../common/rate-limit/distributed-rate-limiter.service';
+import {
+  DistributedRateLimiter,
+  RateLimitLease,
+} from '../../common/rate-limit/distributed-rate-limiter.service';
 import { AdsTxtFetchResult } from '../../common/types';
 import { AppAdsTxtEntity, ApplicationEntity, ScrapingJobEntity } from '../../database/entities';
 import { buildAdsTxtUrl, computeContentHash, hasContentChanged, normalizeDomain } from './domain.utils';
@@ -40,21 +43,25 @@ export class AdsTxtFetcher {
     }
 
     await this.markJobRunning(applicationId);
-
-    const normalizedDomain = normalizeDomain(application.publisherDomain);
-    const url = buildAdsTxtUrl(normalizedDomain);
-    const lease = await this.rateLimiter.acquire(normalizedDomain);
+    let lease: RateLimitLease | null = null;
+    let normalizedDomain = application.publisherDomain;
     const existing = await this.adsTxtRepository.findOne({
       where: { applicationId },
     });
 
     try {
-      const response = await this.fetchAdsTxtDocument(url, normalizedDomain);
+      normalizedDomain = normalizeDomain(application.publisherDomain);
+      const url = buildAdsTxtUrl(normalizedDomain);
+      lease = await this.rateLimiter.acquire(normalizedDomain);
+      const response = await this.fetchAdsTxtDocument(url);
 
       const contentType = response.headers.get('content-type');
 
       if (contentType && !contentType.includes('text')) {
-        throw new ScraperError('Permanent', 'Unexpected content type', { contentType });
+        throw new ScraperError('InvalidContent', 'Unexpected content type', {
+          contentType,
+          responseStatus: response.status,
+        });
       }
 
       const contentHash = computeContentHash(response.body);
@@ -68,10 +75,10 @@ export class AdsTxtFetcher {
           domain: normalizedDomain,
           content: response.body,
           contentHash,
-          httpStatus: response.status,
-          fetchedAt: now,
+          lastHttpStatus: response.status,
+          lastFetchedAt: now,
           lastChangedAt: changed ? now : existing?.lastChangedAt ?? now,
-          errorCode: null,
+          lastErrorCode: null,
         }),
       );
 
@@ -87,6 +94,7 @@ export class AdsTxtFetcher {
           event: 'ads_txt_fetch_succeeded',
           runId,
           applicationId,
+          bundleId: application.bundleId,
           domain: normalizedDomain,
           changed,
           httpStatus: response.status,
@@ -103,6 +111,8 @@ export class AdsTxtFetcher {
         httpStatus: response.status,
         errorCode: null,
         contentType,
+        fetchedAt: now.toISOString(),
+        lastChangedAt: (changed ? now : existing?.lastChangedAt ?? now).toISOString(),
       };
     } catch (error) {
       const classified = error instanceof ScraperError ? error : new ScraperError('Temporary', 'ads.txt fetch failed');
@@ -113,12 +123,12 @@ export class AdsTxtFetcher {
           id: existing?.id,
           applicationId,
           domain: normalizedDomain,
-          content: null,
-          contentHash: null,
-          httpStatus: null,
-          fetchedAt: now,
-          lastChangedAt: null,
-          errorCode: classified.code,
+          content: existing?.content ?? null,
+          contentHash: existing?.contentHash ?? null,
+          lastHttpStatus: (classified.details?.responseStatus as number | null | undefined) ?? null,
+          lastFetchedAt: now,
+          lastChangedAt: existing?.lastChangedAt ?? null,
+          lastErrorCode: classified.code,
         }),
       );
 
@@ -130,7 +140,7 @@ export class AdsTxtFetcher {
 
       await this.markJobFinished(
         applicationId,
-        isRetryableErrorCode(classified.code) ? SCRAPING_JOB_STATUS.failed : SCRAPING_JOB_STATUS.deadLetter,
+        isRetryableErrorCode(classified.code) ? SCRAPING_JOB_STATUS.retrying : SCRAPING_JOB_STATUS.deadLetter,
         classified.message,
       );
 
@@ -140,8 +150,10 @@ export class AdsTxtFetcher {
           event: 'ads_txt_fetch_failed',
           runId,
           applicationId,
+          bundleId: application.bundleId,
           code: classified.code,
           domain: normalizedDomain,
+          httpStatus: classified.details?.responseStatus ?? null,
         },
         classified.stack,
         AdsTxtFetcher.name,
@@ -149,7 +161,9 @@ export class AdsTxtFetcher {
 
       throw classified;
     } finally {
-      await lease.release();
+      if (lease) {
+        await lease.release();
+      }
     }
   }
 
@@ -157,7 +171,7 @@ export class AdsTxtFetcher {
     await this.scrapingJobRepository.increment({ applicationId, type: JOB_TYPES.adsTxtFetch }, 'attempts', 1);
     await this.scrapingJobRepository.update(
       { applicationId, type: JOB_TYPES.adsTxtFetch },
-      { status: SCRAPING_JOB_STATUS.running, startedAt: new Date() },
+      { status: SCRAPING_JOB_STATUS.running, startedAt: new Date(), finishedAt: null, error: null },
     );
   }
 
@@ -184,25 +198,12 @@ export class AdsTxtFetcher {
     return new Date(date.getTime() + hours * 60 * 60 * 1000);
   }
 
-  private async fetchAdsTxtDocument(url: string, domain: string) {
-    try {
-      return await this.httpClient.get({
-        url,
-        headers: {
-          Accept: 'text/plain, text/*;q=0.9, */*;q=0.1',
-        },
-      });
-    } catch (error) {
-      if (domain.endsWith('.local')) {
-        return this.httpClient.get({
-          url: `http://${domain}/app-ads.txt`,
-          headers: {
-            Accept: 'text/plain, text/*;q=0.9, */*;q=0.1',
-          },
-        });
-      }
-
-      throw error;
-    }
+  private async fetchAdsTxtDocument(url: string): Promise<Awaited<ReturnType<ReliableHttpClient['get']>>> {
+    return this.httpClient.get({
+      url,
+      headers: {
+        Accept: 'text/plain, text/*;q=0.9, */*;q=0.1',
+      },
+    });
   }
 }

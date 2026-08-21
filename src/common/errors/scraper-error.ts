@@ -3,7 +3,12 @@ export type ScraperErrorCode =
   | 'Temporary'
   | 'RateLimited'
   | 'NotFound'
+  | 'Forbidden'
   | 'InvalidDomain'
+  | 'InvalidUrl'
+  | 'InvalidContent'
+  | 'ResponseTooLarge'
+  | 'SsrfBlocked'
   | 'Timeout'
   | 'NetworkError';
 

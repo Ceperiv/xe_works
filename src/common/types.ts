@@ -23,4 +23,6 @@ export interface AdsTxtFetchResult {
   httpStatus: number | null;
   errorCode: string | null;
   contentType: string | null;
+  fetchedAt: string;
+  lastChangedAt: string | null;
 }

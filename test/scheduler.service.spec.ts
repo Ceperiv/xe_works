@@ -29,13 +29,13 @@ describe('SchedulerService batching', () => {
       } as never,
       { set: jest.fn(), del: jest.fn() } as never,
       { createQueryBuilder: jest.fn(queryBuilderFactory) } as never,
-      { enqueue: jest.fn().mockResolvedValue(true) } as never,
+      { enqueueIfNeeded: jest.fn().mockResolvedValue(true) } as never,
       { log: jest.fn() } as never,
     );
 
     const queued = await service.scheduleDueMarketplaceChecks();
 
     expect(queued).toBe(3);
-    expect((service as any).enqueueService.enqueue).toHaveBeenCalledTimes(3);
+    expect((service as any).enqueueService.enqueueIfNeeded).toHaveBeenCalledTimes(3);
   });
 });

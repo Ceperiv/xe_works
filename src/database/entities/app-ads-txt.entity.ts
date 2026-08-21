@@ -13,7 +13,7 @@ import { ApplicationEntity } from './application.entity';
 
 @Entity({ name: 'app_ads_txt' })
 @Unique('uq_app_ads_txt_application', ['applicationId'])
-@Index('idx_app_ads_txt_fetched_at', ['fetchedAt'])
+@Index('idx_app_ads_txt_last_fetched_at', ['lastFetchedAt'])
 @Index('idx_app_ads_txt_last_changed_at', ['lastChangedAt'])
 export class AppAdsTxtEntity {
   @PrimaryGeneratedColumn()
@@ -38,16 +38,16 @@ export class AppAdsTxtEntity {
   contentHash!: string | null;
 
   @Column({ type: 'int', nullable: true })
-  httpStatus!: number | null;
+  lastHttpStatus!: number | null;
 
   @Column({ type: 'timestamptz', nullable: true })
-  fetchedAt!: Date | null;
+  lastFetchedAt!: Date | null;
 
   @Column({ type: 'timestamptz', nullable: true })
   lastChangedAt!: Date | null;
 
   @Column({ type: 'varchar', length: 64, nullable: true })
-  errorCode!: string | null;
+  lastErrorCode!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

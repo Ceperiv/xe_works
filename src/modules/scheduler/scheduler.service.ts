@@ -3,6 +3,7 @@ import { ConfigType } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import Redis from 'ioredis';
+import { randomUUID } from 'crypto';
 import { appConfig } from '../../common/config/app-config';
 import { JOB_TYPES } from '../../common/constants';
 import { AppLogger } from '../../common/logging/app-logger.service';
@@ -13,6 +14,7 @@ import { IdempotentJobService } from '../queue/idempotent-job.service';
 @Injectable()
 export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
+  private static readonly LOCK_KEY = 'lock:scheduler:scan';
 
   constructor(
     @Inject(appConfig.KEY)
@@ -45,99 +47,158 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async runDueScans(): Promise<void> {
-    const acquired = await this.redis.set(
-      'lock:scheduler:scan',
-      `${process.pid}`,
-      'PX',
-      this.config.scheduler.lockTtlMs,
-      'NX',
-    );
+    const lockToken = randomUUID();
+    const acquired = await this.acquireSchedulerLock(lockToken);
 
-    if (acquired !== 'OK') {
+    if (!acquired) {
       return;
     }
+
+    const heartbeat = this.startLockHeartbeat(lockToken);
 
     try {
       await this.scheduleDueMarketplaceChecks();
       await this.scheduleDueAdsTxtChecks();
     } finally {
-      await this.redis.del('lock:scheduler:scan');
+      clearInterval(heartbeat);
+      await this.releaseSchedulerLock(lockToken);
     }
   }
 
   async scheduleDueMarketplaceChecks(cursorId = 0): Promise<number> {
-    const now = new Date();
-    const applications = await this.applicationRepository
-      .createQueryBuilder('application')
-      .where('application.nextMarketplaceCheckAt IS NOT NULL')
-      .andWhere('application.nextMarketplaceCheckAt <= :now', { now: now.toISOString() })
-      .andWhere('application.id > :cursorId', { cursorId })
-      .orderBy('application.id', 'ASC')
-      .limit(this.config.scheduler.batchSize)
-      .getMany();
+    const now = new Date().toISOString();
+    let lastId = cursorId;
+    let totalQueued = 0;
 
-    if (!applications.length) {
-      return 0;
+    while (true) {
+      const applications = await this.applicationRepository
+        .createQueryBuilder('application')
+        .where('application.nextMarketplaceCheckAt IS NOT NULL')
+        .andWhere('application.nextMarketplaceCheckAt <= :now', { now })
+        .andWhere('application.id > :cursorId', { cursorId: lastId })
+        .orderBy('application.id', 'ASC')
+        .limit(this.config.scheduler.batchSize)
+        .getMany();
+
+      if (!applications.length) {
+        return totalQueued;
+      }
+
+      for (const application of applications) {
+        await this.enqueueService.enqueueIfNeeded(
+          application.id,
+          JOB_TYPES.marketplaceDiscovery,
+          'scheduler',
+        );
+      }
+
+      totalQueued += applications.length;
+      lastId = applications[applications.length - 1]?.id ?? lastId;
+
+      this.logger.log(
+        {
+          event: 'scheduler_marketplace_batch',
+          queued: applications.length,
+          lastId,
+          totalQueued,
+        },
+        SchedulerService.name,
+      );
+
+      if (applications.length < this.config.scheduler.batchSize) {
+        return totalQueued;
+      }
     }
-
-    for (const application of applications) {
-      await this.enqueueService.enqueue(application.id, JOB_TYPES.marketplaceDiscovery, 'scheduler');
-    }
-
-    const lastId = applications[applications.length - 1]?.id ?? cursorId;
-    const queued = applications.length;
-
-    if (queued === this.config.scheduler.batchSize) {
-      return queued + (await this.scheduleDueMarketplaceChecks(lastId));
-    }
-
-    this.logger.log(
-      {
-        event: 'scheduler_marketplace_batch',
-        queued,
-        lastId,
-      },
-      SchedulerService.name,
-    );
-
-    return queued;
   }
 
   async scheduleDueAdsTxtChecks(cursorId = 0): Promise<number> {
-    const now = new Date();
-    const applications = await this.applicationRepository
-      .createQueryBuilder('application')
-      .where('application.nextAdsTxtCheckAt IS NOT NULL')
-      .andWhere('application.nextAdsTxtCheckAt <= :now', { now: now.toISOString() })
-      .andWhere('application.id > :cursorId', { cursorId })
-      .orderBy('application.id', 'ASC')
-      .limit(this.config.scheduler.batchSize)
-      .getMany();
+    const now = new Date().toISOString();
+    let lastId = cursorId;
+    let totalQueued = 0;
 
-    if (!applications.length) {
-      return 0;
+    while (true) {
+      const applications = await this.applicationRepository
+        .createQueryBuilder('application')
+        .where('application.nextAdsTxtCheckAt IS NOT NULL')
+        .andWhere('application.nextAdsTxtCheckAt <= :now', { now })
+        .andWhere('application.id > :cursorId', { cursorId: lastId })
+        .orderBy('application.id', 'ASC')
+        .limit(this.config.scheduler.batchSize)
+        .getMany();
+
+      if (!applications.length) {
+        return totalQueued;
+      }
+
+      for (const application of applications) {
+        await this.enqueueService.enqueueIfNeeded(application.id, JOB_TYPES.adsTxtFetch, 'scheduler');
+      }
+
+      totalQueued += applications.length;
+      lastId = applications[applications.length - 1]?.id ?? lastId;
+
+      this.logger.log(
+        {
+          event: 'scheduler_ads_txt_batch',
+          queued: applications.length,
+          lastId,
+          totalQueued,
+        },
+        SchedulerService.name,
+      );
+
+      if (applications.length < this.config.scheduler.batchSize) {
+        return totalQueued;
+      }
     }
+  }
 
-    for (const application of applications) {
-      await this.enqueueService.enqueue(application.id, JOB_TYPES.adsTxtFetch, 'scheduler');
-    }
-
-    const lastId = applications[applications.length - 1]?.id ?? cursorId;
-    const queued = applications.length;
-
-    if (queued === this.config.scheduler.batchSize) {
-      return queued + (await this.scheduleDueAdsTxtChecks(lastId));
-    }
-
-    this.logger.log(
-      {
-        event: 'scheduler_ads_txt_batch',
-        queued,
-        lastId,
-      },
-      SchedulerService.name,
+  private async acquireSchedulerLock(lockToken: string): Promise<boolean> {
+    const acquired = await this.redis.set(
+      SchedulerService.LOCK_KEY,
+      lockToken,
+      'PX',
+      this.config.scheduler.lockTtlMs,
+      'NX',
     );
 
-    return queued;
+    return acquired === 'OK';
+  }
+
+  private startLockHeartbeat(lockToken: string): NodeJS.Timeout {
+    const intervalMs = Math.max(1000, Math.floor(this.config.scheduler.lockTtlMs / 3));
+
+    return setInterval(() => {
+      void this.renewSchedulerLock(lockToken);
+    }, intervalMs);
+  }
+
+  private async renewSchedulerLock(lockToken: string): Promise<void> {
+    await this.redis.eval(
+      `
+      if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+      end
+      return 0
+      `,
+      1,
+      SchedulerService.LOCK_KEY,
+      lockToken,
+      `${this.config.scheduler.lockTtlMs}`,
+    );
+  }
+
+  private async releaseSchedulerLock(lockToken: string): Promise<void> {
+    await this.redis.eval(
+      `
+      if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("DEL", KEYS[1])
+      end
+      return 0
+      `,
+      1,
+      SchedulerService.LOCK_KEY,
+      lockToken,
+    );
   }
 }

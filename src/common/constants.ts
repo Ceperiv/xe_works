@@ -25,6 +25,7 @@ export type ApplicationStatus = (typeof APPLICATION_STATUS)[keyof typeof APPLICA
 export const SCRAPING_JOB_STATUS = {
   scheduled: 'scheduled',
   running: 'running',
+  retrying: 'retrying',
   succeeded: 'succeeded',
   failed: 'failed',
   deadLetter: 'dead_letter',

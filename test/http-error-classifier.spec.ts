@@ -2,6 +2,7 @@ import { classifyHttpFailure, shouldRetryHttpError } from '../src/common/http/ht
 
 describe('http error classifier', () => {
   it('maps status codes to scraper errors', () => {
+    expect(classifyHttpFailure(undefined, 403).code).toBe('Forbidden');
     expect(classifyHttpFailure(undefined, 404).code).toBe('NotFound');
     expect(classifyHttpFailure(undefined, 429).code).toBe('RateLimited');
     expect(classifyHttpFailure(undefined, 503).code).toBe('Temporary');

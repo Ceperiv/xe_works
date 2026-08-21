@@ -28,13 +28,13 @@ export class ApplicationsService {
 
   async enqueueAdsTxtScrape(id: number): Promise<{ enqueued: boolean }> {
     await this.getById(id);
-    const enqueued = await this.enqueueService.enqueue(id, JOB_TYPES.adsTxtFetch, 'api');
+    const enqueued = await this.enqueueService.forceEnqueue(id, JOB_TYPES.adsTxtFetch, 'api');
     return { enqueued };
   }
 
   async enqueueMarketplaceRefresh(id: number): Promise<{ enqueued: boolean }> {
     await this.getById(id);
-    const enqueued = await this.enqueueService.enqueue(id, JOB_TYPES.marketplaceDiscovery, 'api');
+    const enqueued = await this.enqueueService.forceEnqueue(id, JOB_TYPES.marketplaceDiscovery, 'api');
     return { enqueued };
   }
 }

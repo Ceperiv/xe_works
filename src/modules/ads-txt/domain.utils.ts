@@ -8,7 +8,7 @@ export const normalizeDomain = (value: string): string => {
     throw new ScraperError('InvalidDomain', 'Domain is empty');
   }
 
-  const withoutProtocol = trimmed.replace(/^https?:\/\//, '');
+  const withoutProtocol = trimmed.replace(/^[a-z]+:\/\//, '');
   const withoutPath = withoutProtocol.split('/')[0]?.split('?')[0] ?? '';
   const withoutPort = withoutPath.split(':')[0] ?? '';
   const normalized = withoutPort.replace(/^\.+|\.+$/g, '');
@@ -20,7 +20,14 @@ export const normalizeDomain = (value: string): string => {
   return normalized;
 };
 
-export const buildAdsTxtUrl = (domain: string): string => `https://${normalizeDomain(domain)}/app-ads.txt`;
+export const buildAdsTxtUrl = (domain: string): string => {
+  const normalizedDomain = normalizeDomain(domain);
+  const url = new URL(`https://${normalizedDomain}`);
+  url.pathname = '/app-ads.txt';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+};
 
 export const computeContentHash = (content: string): string =>
   createHash('sha256').update(content).digest('hex');

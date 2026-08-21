@@ -11,6 +11,11 @@ export interface RateLimitLease {
   release(): Promise<void>;
 }
 
+interface AcquiredSlot {
+  key: string;
+  token: string;
+}
+
 @Injectable()
 export class DistributedRateLimiter {
   constructor(
@@ -30,27 +35,30 @@ export class DistributedRateLimiter {
     }
 
     while (Date.now() - startedAt < this.config.rateLimit.acquireTimeoutMs) {
-      const tokens: string[] = [];
+      const slots: AcquiredSlot[] = [];
 
       try {
         for (const key of keys) {
           const limit = key === 'global' ? this.config.rateLimit.globalLimit : this.config.rateLimit.perDomainLimit;
-          const token = await this.tryAcquireKey(key, limit);
+          const slot = await this.tryAcquireKey(key, limit);
 
-          if (!token) {
+          if (!slot) {
             throw new Error(`Unable to acquire key ${key}`);
           }
 
-          tokens.push(token);
+          slots.push(slot);
         }
+
+        const heartbeat = this.startHeartbeat(slots);
 
         return {
           release: async () => {
-            await Promise.all(tokens.map((token) => this.redis.del(token)));
+            clearInterval(heartbeat);
+            await Promise.all(slots.map((slot) => this.releaseSlot(slot)));
           },
         };
       } catch {
-        await Promise.all(tokens.map((token) => this.redis.del(token)));
+        await Promise.all(slots.map((slot) => this.releaseSlot(slot)));
         await this.delay(this.config.rateLimit.pollMs);
       }
     }
@@ -68,7 +76,7 @@ export class DistributedRateLimiter {
     });
   }
 
-  private async tryAcquireKey(key: string, limit: number): Promise<string | null> {
+  private async tryAcquireKey(key: string, limit: number): Promise<AcquiredSlot | null> {
     const token = `rate-limit:${key}:${randomUUID()}`;
 
     for (let attempt = 0; attempt < limit; attempt += 1) {
@@ -76,11 +84,51 @@ export class DistributedRateLimiter {
       const acquired = await this.redis.set(slotKey, token, 'PX', this.config.rateLimit.slotTtlMs, 'NX');
 
       if (acquired === 'OK') {
-        return slotKey;
+        return {
+          key: slotKey,
+          token,
+        };
       }
     }
 
     return null;
+  }
+
+  private startHeartbeat(slots: AcquiredSlot[]): NodeJS.Timeout {
+    const intervalMs = Math.max(1000, Math.floor(this.config.rateLimit.slotTtlMs / 3));
+
+    return setInterval(() => {
+      void Promise.all(slots.map((slot) => this.renewSlot(slot)));
+    }, intervalMs);
+  }
+
+  private async renewSlot(slot: AcquiredSlot): Promise<void> {
+    await this.redis.eval(
+      `
+      if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+      end
+      return 0
+      `,
+      1,
+      slot.key,
+      slot.token,
+      `${this.config.rateLimit.slotTtlMs}`,
+    );
+  }
+
+  private async releaseSlot(slot: AcquiredSlot): Promise<void> {
+    await this.redis.eval(
+      `
+      if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("DEL", KEYS[1])
+      end
+      return 0
+      `,
+      1,
+      slot.key,
+      slot.token,
+    );
   }
 
   private async delay(ms: number): Promise<void> {
